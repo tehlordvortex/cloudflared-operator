@@ -5,12 +5,13 @@ use std::{
     iter,
     net::SocketAddr,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use cloudflare::endpoints::cfd_tunnel::{
     self, create_tunnel, delete_tunnel, list_tunnels, update_tunnel,
 };
+use futures::FutureExt;
 use k8s_openapi::{
     DeepMerge,
     api::{
@@ -36,11 +37,12 @@ use kube::{
     core::Selector,
     runtime::{controller::Action, finalizer, reflector},
 };
+use metrics::{counter, histogram};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use serde_with::{base64::Base64, serde_as};
-use tracing::{debug, error, instrument, trace};
+use tracing::{debug, instrument, trace, warn};
 
 use crate::{Error, Result, WatchNamespace};
 
@@ -309,6 +311,7 @@ pub async fn run_once(
     tunnel: Arc<CfdTunnel>,
     ctx: Arc<Context>,
 ) -> Result<Action, finalizer::Error<Error>> {
+    let start = Instant::now();
     let crd_api: Api<CfdTunnel> = Api::namespaced(
         ctx.k8s_client.clone(),
         &tunnel.namespace().expect("namespaced"),
@@ -317,14 +320,35 @@ pub async fn run_once(
     finalizer(
         &crd_api,
         "cfdtunnels.cfd-operator.vrtx.sh/cleanup",
-        tunnel,
-        |event| async {
-            match event {
-                finalizer::Event::Apply(tunnel) => reconcile(tunnel, ctx).await,
-                finalizer::Event::Cleanup(tunnel) => cleanup(tunnel, ctx).await,
+        tunnel.clone(),
+        {
+            let ctx = ctx.clone();
+
+            |event| async {
+                match event {
+                    finalizer::Event::Apply(tunnel) => reconcile(tunnel, ctx).await,
+                    finalizer::Event::Cleanup(tunnel) => cleanup(tunnel, ctx).await,
+                }
             }
         },
     )
+    .map(|result| {
+        let duration = start.elapsed().as_millis() as f64 / 1000.0;
+        let metrics_labels = metrics_labels(&ctx, &tunnel);
+
+        counter!(
+            "cfdtunnel_controller_reconciliations_total",
+            &metrics_labels,
+        )
+        .increment(1);
+        histogram!(
+            "cfdtunnel_controller_reconciliation_duration_seconds",
+            &metrics_labels
+        )
+        .record(duration);
+
+        result
+    })
     .await
 }
 
@@ -696,9 +720,28 @@ pub async fn cleanup(tunnel: Arc<CfdTunnel>, ctx: Arc<Context>) -> Result<Action
 pub fn error_policy(
     tunnel: Arc<CfdTunnel>,
     error: &finalizer::Error<Error>,
-    _ctx: Arc<Context>,
+    ctx: Arc<Context>,
 ) -> Action {
-    error!(
+    let metrics_labels = metrics_labels(&ctx, &tunnel);
+    counter!(
+        "cfdtunnel_controller_reconciliation_errors_total",
+        &metrics_labels,
+    )
+    .increment(1);
+
+    match error {
+        finalizer::Error::ApplyFailed(Error::CfError(_) | Error::CfTunnel(_))
+        | finalizer::Error::CleanupFailed(Error::CfError(_) | Error::CfTunnel(_)) => {
+            counter!(
+                "cfdtunnel_controller_cloudflare_errors_total",
+                &metrics_labels,
+            )
+            .increment(1);
+        }
+        _ => {}
+    }
+
+    warn!(
         tunnel = ?tunnel,
         error = error.to_string(),
         "failed to reconcile tunnel"
@@ -943,8 +986,6 @@ fn generate_owned_deployment(
             ..Default::default()
         }]),
         security_context: Some(PodSecurityContext {
-            run_as_user: Some(1000),
-            run_as_group: Some(1000),
             run_as_non_root: Some(true),
             seccomp_profile: Some(SeccompProfile {
                 type_: "RuntimeDefault".into(),
@@ -1090,7 +1131,7 @@ where
         .await
         .map_err(Error::Delete)?;
 
-    debug!(result = ?result, "delete old resources");
+    debug!(result = ?result, "cleanup old resources");
 
     Ok(())
 }
@@ -1150,6 +1191,17 @@ fn common_labels(ctx: &Arc<Context>, tunnel: &Arc<CfdTunnel>) -> BTreeMap<String
         ("app.kubernetes.io/managed-by".into(), ctx.name.clone()),
     ]
     .into()
+}
+
+fn metrics_labels(ctx: &Arc<Context>, tunnel: &Arc<CfdTunnel>) -> [(&'static str, String); 3] {
+    [
+        ("operator_namespace", ctx.namespace.clone()),
+        ("resource_name", tunnel.name_any()),
+        (
+            "resource_namespace",
+            tunnel.namespace().expect("namespaced"),
+        ),
+    ]
 }
 
 // https://github.com/kubernetes-sigs/external-dns/blob/master/config/crd/standard/dnsendpoints.externaldns.k8s.io.yaml

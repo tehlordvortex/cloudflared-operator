@@ -31,6 +31,11 @@ kube = { version = "3.1.0", default-features = false, features = [
   "rustls-tls",
   "unstable-runtime",
 ] }
+metrics = "0.24.3"
+metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = [
+  "http-listener",
+] }
+metrics-process = "2.4.3"
 mimalloc = "0.1.48"
 rand = "0.10.0"
 schemars = "1.2.1"
@@ -40,5 +45,6 @@ serde_with = { version = "3.18.0", features = ["base64"] }
 serde_yaml = "0.9.34"
 thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["full"] }
+tokio-util = "0.7.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

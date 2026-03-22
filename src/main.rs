@@ -1,16 +1,19 @@
-use std::{env, sync::Arc};
+use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{
     Api,
     runtime::{Controller, WatchStreamExt, metadata_watcher, watcher},
 };
+use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio::{
     signal::unix::{SignalKind, signal},
     task::JoinSet,
+    time::interval,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -35,6 +38,18 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    let metrics_addr = env::var("METRICS_ADDR")
+        .unwrap_or("0.0.0.0:9000".into())
+        .parse::<SocketAddr>()?;
+
+    PrometheusBuilder::new()
+        .with_http_listener(metrics_addr)
+        .install()?;
+
+    let process_collector = metrics_process::Collector::default();
+    process_collector.describe();
+    operator::describe_metrics();
+
     let operator_name = env::var("OPERATOR_NAME").unwrap_or(DEFAULT_OPERATOR_NAME.to_string());
     let operator_namespace = env::var("OPERATOR_NAMESPACE")
         .expect("OPERATOR_NAMESPACE must be set to the namespace the operator is running in.");
@@ -51,8 +66,6 @@ async fn main() -> anyhow::Result<()> {
         "At least one namespace must be specified in WATCH_NAMESPACE if it is provided"
     );
 
-    let mut join_set = JoinSet::new();
-
     let k8s_client = kube::Client::try_default()
         .await
         .context("KUBECONFIG not valid or missing")?;
@@ -67,6 +80,23 @@ async fn main() -> anyhow::Result<()> {
         );
         major >= 1 && minor >= 33
     };
+
+    let mut join_set = JoinSet::new();
+    let cancel_token = CancellationToken::new();
+    join_set.spawn({
+        let cancel_token = cancel_token.clone();
+        async move {
+            let mut interval = interval(Duration::from_secs(15));
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => break,
+                    _ = interval.tick() => {
+                        process_collector.collect();
+                    }
+                }
+            }
+        }
+    });
 
     for watch_namespace in watch_namespaces {
         let crd_watch_api: Api<CfdTunnel> = watch_namespace.watch_api(k8s_client.clone());
@@ -110,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
             })
             .run(operator::run_once, operator::error_policy, ctx);
 
+        let cancel_token = cancel_token.clone();
         join_set.spawn(async move {
             controller_stream
                 .for_each(|msg| {
@@ -128,9 +159,15 @@ async fn main() -> anyhow::Result<()> {
 
                     futures::future::ready(())
                 })
-                .await;
+                .map(|result| {
+                    cancel_token.cancel();
+                    result
+                })
+                .await
         });
     }
+
+    info!(use_streaming_lists, "running, metrics: {metrics_addr}");
 
     join_set.join_all().await;
 

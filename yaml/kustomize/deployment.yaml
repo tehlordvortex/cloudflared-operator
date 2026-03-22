@@ -24,6 +24,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          ports:
+            - containerPort: 9000
+              name: metrics
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
           securityContext:
             privileged: false
             allowPrivilegeEscalation: false

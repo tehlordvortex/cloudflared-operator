@@ -3,6 +3,7 @@ use std::fmt::Debug;
 
 use cloudflare::framework::response::ApiFailure;
 pub use controller::*;
+use metrics::{Unit, describe_counter, describe_histogram};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -42,4 +43,27 @@ impl WatchNamespace {
             WatchNamespace::All => kube::Api::all(client),
         }
     }
+}
+
+pub fn describe_metrics() {
+    describe_counter!(
+        "cfdtunnel_controller_reconciliations_total",
+        Unit::Count,
+        "reconciliation attempts"
+    );
+    describe_counter!(
+        "cfdtunnel_controller_reconciliation_errors_total",
+        Unit::Count,
+        "failed reconciliation attempts"
+    );
+    describe_counter!(
+        "cfdtunnel_controller_cloudflare_errors_total",
+        Unit::Count,
+        "cloudflare errors encountered during reconciliation"
+    );
+    describe_histogram!(
+        "cfdtunnel_controller_reconciliation_duration_seconds",
+        Unit::Seconds,
+        "time spent in reconciliation"
+    );
 }

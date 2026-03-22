@@ -23,6 +23,14 @@ run = [
   "cargo zigbuild --target $(rustc --print host-tuple | sed s/gnu/musl/)",
 ]
 
+[tasks.dev]
+depends = "build"
+run = "./target/$(rustc --print host-tuple | sed s/gnu/musl/)/debug/operator"
+
+[tasks.dev.env]
+OPERATOR_NAMESPACE = "cfd-dev-system"
+WATCH_NAMESPACE = "cfd-dev-system"
+
 [tasks.'docker:build']
 sources = ["Dockerfile", "docker/*", "Cargo.toml", "Cargo.lock", "src/**/*.rs"]
 usage = """
