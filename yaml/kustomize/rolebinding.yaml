@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://github.com/yannh/kubernetes-json-schema/raw/refs/heads/master/v1.35.2/rolebinding.json
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cloudflared-operator
+  namespace: cfd-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cloudflared-operator
+subjects:
+  - kind: ServiceAccount
+    name: cloudflared-operator
+    namespace: cfd-system

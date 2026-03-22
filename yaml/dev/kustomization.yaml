@@ -1,0 +1,43 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: cfd-dev-system
+
+images:
+  - name: ghcr.io/tehlordvortex/cloudflared-operator/operator
+    newTag: dev
+
+resources:
+  - ../kustomize
+
+patches:
+  - target:
+      kind: Deployment
+      name: cloudflared-operator
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Always
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0
+        value:
+          name: RUST_LOG
+          value: trace
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: OPERATOR_NAME
+          value: cfd-dev-operator
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: WATCH_NAMESPACE
+          value: cfd-dev-system
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 50m
+            memory: 32Mi

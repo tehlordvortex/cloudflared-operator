@@ -1,0 +1,169 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/name: cloudflared-operator
+    app.kubernetes.io/version: v0.0.1
+  name: cfd-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/name: cloudflared-operator
+    app.kubernetes.io/version: v0.0.1
+  name: cloudflared-operator
+  namespace: cfd-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/name: cloudflared-operator
+    app.kubernetes.io/version: v0.0.1
+  name: cloudflared-operator
+  namespace: cfd-system
+rules:
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - create
+  - patch
+  - deletecollection
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  - configmaps
+  verbs:
+  - get
+  - create
+  - patch
+  - deletecollection
+- apiGroups:
+  - externaldns.k8s.io
+  resources:
+  - dnsendpoints
+  verbs:
+  - get
+  - create
+  - patch
+  - deletecollection
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: cloudflared-operator
+    app.kubernetes.io/version: v0.0.1
+  name: cloudflared-operator
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - watch
+  - list
+- apiGroups:
+  - cloudflared-operator.vrtx.sh
+  resources:
+  - cfdtunnels
+  verbs:
+  - get
+  - watch
+  - list
+  - patch
+- apiGroups:
+  - cloudflared-operator.vrtx.sh
+  resources:
+  - cfdtunnels/status
+  verbs:
+  - '*'
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: cloudflared-operator
+    app.kubernetes.io/version: v0.0.1
+  name: cloudflared-operator
+  namespace: cfd-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cloudflared-operator
+subjects:
+- kind: ServiceAccount
+  name: cloudflared-operator
+  namespace: cfd-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: cloudflared-operator
+    app.kubernetes.io/version: v0.0.1
+  name: cloudflared-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cloudflared-operator
+subjects:
+- kind: ServiceAccount
+  name: cloudflared-operator
+  namespace: cfd-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: cloudflared-operator
+    app.kubernetes.io/version: v0.0.1
+  name: cloudflared-operator
+  namespace: cfd-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared-operator
+      app.kubernetes.io/version: v0.0.1
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloudflared-operator
+        app.kubernetes.io/version: v0.0.1
+    spec:
+      containers:
+      - env:
+        - name: RUST_LOG
+          value: info
+        - name: OPERATOR_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        image: ghcr.io/tehlordvortex/cloudflared-operator/operator:v0.0.1
+        name: operator
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+          seccompProfile:
+            type: RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+      serviceAccountName: cloudflared-operator

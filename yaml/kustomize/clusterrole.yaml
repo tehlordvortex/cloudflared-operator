@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://github.com/yannh/kubernetes-json-schema/raw/refs/heads/master/v1.35.2/clusterrole.json
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloudflared-operator
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["cloudflared-operator.vrtx.sh"]
+    resources: ["cfdtunnels"]
+    verbs: ["get", "watch", "list", "patch"]
+  - apiGroups: ["cloudflared-operator.vrtx.sh"]
+    resources: ["cfdtunnels/status"]
+    verbs: ["*"]

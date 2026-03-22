@@ -1,0 +1,64 @@
+apiVersion: cloudflared-operator.vrtx.sh/v1alpha1
+kind: CfdTunnel
+metadata:
+  name: simple-tunnel
+  labels:
+    app.kubernetes.io/name: simple-tunnel
+spec:
+  accountId: "xxxxxxxxx"
+  apiToken:
+    secretRef:
+      name: xxxxx
+
+  serviceRef:
+    name: simple-tunnel
+  ingress:
+    - service: http://simple-tunnel
+      originRequestConfig: |
+        connectTimeout: 15s
+
+  containerOverrides:
+    name: cloudflared
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simple-tunnel
+  labels:
+    app.kubernetes.io/name: simple-tunnel
+spec:
+  trafficDistribution: PreferClose
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: simple-tunnel
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-tunnel
+  labels:
+    app.kubernetes.io/name: simple-tunnel
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: simple-tunnel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: simple-tunnel
+    spec:
+      containers:
+        - name: whoami
+          image: docker.io/traefik/whoami:v1.11.0
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP

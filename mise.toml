@@ -1,0 +1,42 @@
+[tools]
+cargo-binstall = "1.17.8"
+"cargo:cargo-zigbuild" = "0.22.1"
+kustomize = "5.8.1"
+rust = "1.94.0"
+yq = "4.52.4"
+zig = "0.15.2"
+
+[env]
+'_'.file.path = ".env"
+
+[tasks.crdgen]
+depends = "build"
+run = "./target/$(rustc --print host-tuple | sed s/gnu/musl/)/debug/crdgen > yaml/cfdtunnels.cloudflared-operator.vrtx.sh.yaml"
+
+[tasks.bundlegen]
+run = "kustomize build yaml/kustomize > yaml/bundle.yaml"
+
+[tasks.build]
+sources = ["Cargo.toml", "Cargo.lock", "src/**/*.rs"]
+run = [
+  "rustup target add $(rustc --print host-tuple | sed s/gnu/musl/)",
+  "cargo zigbuild --target $(rustc --print host-tuple | sed s/gnu/musl/)",
+]
+
+[tasks.'docker:build']
+sources = ["Dockerfile", "docker/*", "Cargo.toml", "Cargo.lock", "src/**/*.rs"]
+usage = """
+flag "--repository <repository>" help="oci repository" default="ghcr.io/tehlordvortex/cloudflared-operator"
+flag "--push" default="false"
+flag "--tag <tag>" default="dev"
+flag "--target <target>" default="operator"
+flag "--progress <progress>" default="auto"
+"""
+run = """
+docker buildx build --platform=linux/amd64,linux/arm64 --push={{ usage.push }} \
+  --target {{ usage.target }} --progress {{ usage.progress }} \
+  -t {{ usage.repository }}/operator:{{ usage.tag }} .
+"""
+
+[tasks.'docker:build:versioned']
+run = "mise docker:build --tag v$(yq '.package.version' Cargo.toml)"
