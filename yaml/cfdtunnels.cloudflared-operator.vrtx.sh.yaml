@@ -22,7 +22,9 @@ spec:
             description: Manages a cloudflared tunnel and its replicas for a particular service
             properties:
               accountId:
-                description: The Account ID under which the tunnel will be created
+                description: |-
+                  The Account ID under which the tunnel will be created (with the format
+                  {operator_name}:{cr_namespace}/{cr_name}).
                 type: string
               additionalContainers:
                 description: Add additional containers to the pod

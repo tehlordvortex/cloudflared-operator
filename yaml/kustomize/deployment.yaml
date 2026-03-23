@@ -18,8 +18,6 @@ spec:
         - name: operator
           image: ghcr.io/tehlordvortex/cloudflared-operator/operator
           env:
-            - name: RUST_LOG
-              value: info
             - name: OPERATOR_NAMESPACE
               valueFrom:
                 fieldRef:

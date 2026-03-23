@@ -98,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    for watch_namespace in watch_namespaces {
+    for watch_namespace in &watch_namespaces {
         let crd_watch_api: Api<CfdTunnel> = watch_namespace.watch_api(k8s_client.clone());
         let endpointslice_watch_api: Api<EndpointSlice> =
             watch_namespace.watch_api(k8s_client.clone());
@@ -167,7 +167,13 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    info!(use_streaming_lists, "running, metrics: {metrics_addr}");
+    info!(
+        name = operator_name,
+        namespace = operator_namespace,
+        watch_namespaces = ?watch_namespaces,
+        use_streaming_lists,
+        "running, metrics: {metrics_addr}"
+    );
 
     join_set.join_all().await;
 
