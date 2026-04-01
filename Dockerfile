@@ -16,7 +16,9 @@ RUN --mount=type=cache,target=${MISE_CACHE_DIR} \
   --mount=type=cache,target=/root/.rustup \
   --mount=type=cache,target=/root/.cargo/git/db \
   --mount=type=cache,target=/root/.cargo/registry \
-  mise install
+  mise install && \
+  rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl \
+  aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu
 
 WORKDIR /build
 RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
@@ -25,9 +27,7 @@ RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
   --mount=type=cache,target=/root/.rustup \
   --mount=type=cache,target=/root/.cargo/git/db \
   --mount=type=cache,target=/root/.cargo/registry \
-  cargo fetch --locked && \
-  rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl \
-  aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu
+  cargo fetch --locked
 
 ARG TARGETARCH
 ENV TARGETARCH=${TARGETARCH}

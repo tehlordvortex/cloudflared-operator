@@ -563,7 +563,8 @@ pub async fn reconcile(mut tunnel: Arc<CfdTunnel>, ctx: Arc<Context>) -> Result<
                     endpoint
                         .conditions
                         .as_ref()
-                        .and_then(|conditions| conditions.serving.or(Some(true)))
+                        // Only consider endpoints that are not terminating
+                        .and_then(|conditions| conditions.terminating.or(Some(false)).map(|c| !c))
                         .unwrap_or_default()
                 })
                 .map(|endpoint| endpoint.node_name.clone())
