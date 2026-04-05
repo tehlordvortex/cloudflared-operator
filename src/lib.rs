@@ -1,8 +1,10 @@
 pub mod controller;
+mod ext_cr;
+pub use controller::*;
+
 use std::fmt::Debug;
 
 use cloudflare::framework::response::ApiFailure;
-pub use controller::*;
 use metrics::{Unit, describe_counter, describe_histogram};
 
 #[derive(thiserror::Error, Debug)]

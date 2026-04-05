@@ -5,12 +5,12 @@ use futures::{FutureExt, StreamExt};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{
     Api,
-    runtime::{Controller, WatchStreamExt, metadata_watcher, watcher},
+    core::Expression,
+    runtime::{Controller, WatchStreamExt, metadata_watcher, predicates, reflector, watcher},
 };
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio::{
     signal::unix::{SignalKind, signal},
-    task::JoinSet,
     time::interval,
 };
 use tokio_util::sync::CancellationToken;
@@ -65,6 +65,10 @@ async fn main() -> anyhow::Result<()> {
         0,
         "At least one namespace must be specified in WATCH_NAMESPACE if it is provided"
     );
+    let dry_run = env::var("DRY_RUN")
+        .unwrap_or("false".to_string())
+        .to_lowercase()
+        .parse::<bool>()?;
 
     let k8s_client = kube::Client::try_default()
         .await
@@ -81,9 +85,8 @@ async fn main() -> anyhow::Result<()> {
         major >= 1 && minor >= 33
     };
 
-    let mut join_set = JoinSet::new();
     let cancel_token = CancellationToken::new();
-    join_set.spawn({
+    let process_metrics = {
         let cancel_token = cancel_token.clone();
         async move {
             let mut interval = interval(Duration::from_secs(15));
@@ -96,76 +99,88 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-    });
+    };
 
-    for watch_namespace in &watch_namespaces {
+    let mut watcher_config = watcher::Config::default();
+    if use_streaming_lists {
+        watcher_config = watcher_config.streaming_lists();
+    }
+
+    let (crd_reader, crd_writer) = reflector::store();
+    let crd_streams = watch_namespaces.iter().flat_map(|watch_namespace| {
         let crd_watch_api: Api<CfdTunnel> = watch_namespace.watch_api(k8s_client.clone());
+        let make_stream = |config: watcher::Config| {
+            watcher(crd_watch_api.clone(), config)
+                .default_backoff()
+                .boxed()
+        };
+
+        [
+            make_stream(
+                watcher_config.clone().labels_from(
+                    &Expression::Equal(
+                        "cfd-operator.vrtx.sh/operator-name".into(),
+                        operator_name.clone(),
+                    )
+                    .into(),
+                ),
+            ),
+            make_stream(watcher_config.clone().labels_from(
+                &Expression::DoesNotExist("cfd-operator.vrtx.sh/operator-name".into()).into(),
+            )),
+        ]
+    });
+    let crd_stream = futures::stream::select_all(crd_streams)
+        .reflect(crd_writer)
+        .applied_objects()
+        .predicate_filter(predicates::generation, Default::default());
+
+    let endpointslice_streams = watch_namespaces.iter().map(|watch_namespace| {
         let endpointslice_watch_api: Api<EndpointSlice> =
             watch_namespace.watch_api(k8s_client.clone());
 
-        let ctx = Arc::new(operator::Context {
-            name: operator_name.clone(),
-            namespace: operator_namespace.clone(),
-            watch_namespace: watch_namespace.clone(),
-            k8s_client: k8s_client.clone(),
-            crd_watch_api: crd_watch_api.clone(),
-            endpointslice_watch_api: endpointslice_watch_api.clone(),
+        metadata_watcher(endpointslice_watch_api.clone(), watcher_config.clone())
+            .default_backoff()
+            .boxed()
+    });
+    let endpointslice_metadata_stream =
+        futures::stream::select_all(endpointslice_streams).touched_objects();
+
+    let mut int_sig = signal(SignalKind::interrupt())?;
+    let mut term_sig = signal(SignalKind::terminate())?;
+    let ctx = Arc::new(operator::Context {
+        name: operator_name.clone(),
+        namespace: operator_namespace.clone(),
+        dry_run,
+        k8s_client: k8s_client.clone(),
+    });
+    let controller = Controller::for_stream(crd_stream, crd_reader.clone())
+        .watches_stream(endpointslice_metadata_stream, move |partial_object_meta| {
+            operator::map_endpointslice_to_crd_ref(&crd_reader, &partial_object_meta)
+        })
+        .graceful_shutdown_on(async move {
+            int_sig.recv().await;
+        })
+        .graceful_shutdown_on(async move {
+            term_sig.recv().await;
+        })
+        .run(operator::run_once, operator::error_policy, ctx.clone())
+        .for_each(|msg| {
+            match msg {
+                Err(error) => {
+                    error!(operator_name, %error, "reconciliation failed");
+                }
+                Ok((tunnel, action)) => {
+                    info!(operator_name, ?tunnel, ?action, "object reconciled");
+                }
+            };
+
+            futures::future::ready(())
+        })
+        .map(|result| {
+            cancel_token.cancel();
+            result
         });
-
-        let mut watcher_config = watcher::Config::default();
-        if use_streaming_lists {
-            watcher_config = watcher_config.streaming_lists();
-        }
-
-        let endpointslice_metadata_stream =
-            metadata_watcher(endpointslice_watch_api.clone(), watcher_config.clone())
-                .default_backoff()
-                .touched_objects();
-
-        let controller = Controller::new(crd_watch_api.clone(), watcher_config.clone());
-        let crd_reader = controller.store();
-
-        let mut int_sig = signal(SignalKind::interrupt())?;
-        let mut term_sig = signal(SignalKind::terminate())?;
-
-        let controller_stream = controller
-            .watches_stream(endpointslice_metadata_stream, move |partial_object_meta| {
-                operator::map_endpointslice_to_crd_ref(&crd_reader, &partial_object_meta)
-            })
-            .graceful_shutdown_on(async move {
-                int_sig.recv().await;
-            })
-            .graceful_shutdown_on(async move {
-                term_sig.recv().await;
-            })
-            .run(operator::run_once, operator::error_policy, ctx);
-
-        let cancel_token = cancel_token.clone();
-        join_set.spawn(async move {
-            controller_stream
-                .for_each(|msg| {
-                    match msg {
-                        Err(error) => {
-                            error!(error = error.to_string(), "reconciliation failed");
-                        }
-                        Ok((tunnel, action)) => {
-                            info!(
-                                tunnel = format!("{tunnel:?}"),
-                                action = format!("{action:?}"),
-                                "object reconciled"
-                            );
-                        }
-                    };
-
-                    futures::future::ready(())
-                })
-                .map(|result| {
-                    cancel_token.cancel();
-                    result
-                })
-                .await
-        });
-    }
 
     info!(
         name = operator_name,
@@ -175,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
         "running, metrics: {metrics_addr}"
     );
 
-    join_set.join_all().await;
+    futures::join!(process_metrics, controller);
 
     Ok(())
 }

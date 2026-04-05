@@ -12,7 +12,15 @@ spec:
     singular: cfdtunnel
   scope: Namespaced
   versions:
-  - additionalPrinterColumns: []
+  - additionalPrinterColumns:
+    - description: Service used to identify nodes serving traffic for this instance
+      jsonPath: .spec.serviceRef.name
+      name: Service
+      type: string
+    - description: Cloudflare Tunnel ID
+      jsonPath: .status.tunnelId
+      name: TunnelId
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -1875,32 +1883,55 @@ spec:
                               endpoints:
                                 items:
                                   properties:
-                                    dnsName:
-                                      type: string
-                                    labels:
-                                      additionalProperties:
-                                        type: string
+                                    config:
+                                      description: '"dnsName", "recordType", and "targets" are ignored'
                                       nullable: true
+                                      properties:
+                                        dnsName:
+                                          description: The hostname of the DNS record
+                                          nullable: true
+                                          type: string
+                                        labels:
+                                          additionalProperties:
+                                            type: string
+                                          description: Labels stores labels defined for the Endpoint
+                                          nullable: true
+                                          type: object
+                                        providerSpecific:
+                                          description: ProviderSpecific stores provider specific config
+                                          items:
+                                            description: ProviderSpecificProperty holds the name and value of a configuration which is specific to individual DNS providers
+                                            properties:
+                                              name:
+                                                nullable: true
+                                                type: string
+                                              value:
+                                                nullable: true
+                                                type: string
+                                            type: object
+                                          nullable: true
+                                          type: array
+                                        recordTTL:
+                                          description: TTL for the record
+                                          format: int64
+                                          nullable: true
+                                          type: integer
+                                        recordType:
+                                          description: RecordType type of record, e.g. CNAME, A, AAAA, SRV, TXT etc
+                                          nullable: true
+                                          type: string
+                                        setIdentifier:
+                                          description: Identifier to distinguish multiple records with the same name and type (e.g. Route53 records with routing policies other than 'simple')
+                                          nullable: true
+                                          type: string
+                                        targets:
+                                          description: The targets the DNS record points to
+                                          items:
+                                            type: string
+                                          nullable: true
+                                          type: array
                                       type: object
-                                    providerSpecific:
-                                      items:
-                                        properties:
-                                          name:
-                                            type: string
-                                          value:
-                                            type: string
-                                        required:
-                                        - name
-                                        - value
-                                        type: object
-                                      nullable: true
-                                      type: array
-                                    recordTTL:
-                                      format: int64
-                                      nullable: true
-                                      type: integer
-                                    setIdentifier:
-                                      nullable: true
+                                    dnsName:
                                       type: string
                                   required:
                                   - dnsName
@@ -1915,51 +1946,58 @@ spec:
                               if Cloudflare Tunnels is down
                             properties:
                               spec:
+                                description: DNSEndpointSpec defines the desired state of DNSEndpoint
                                 properties:
                                   endpoints:
                                     items:
+                                      description: Endpoint is a high-level way of a connection between a service and an IP
                                       properties:
                                         dnsName:
+                                          description: The hostname of the DNS record
+                                          nullable: true
                                           type: string
                                         labels:
                                           additionalProperties:
                                             type: string
+                                          description: Labels stores labels defined for the Endpoint
+                                          nullable: true
                                           type: object
                                         providerSpecific:
+                                          description: ProviderSpecific stores provider specific config
                                           items:
+                                            description: ProviderSpecificProperty holds the name and value of a configuration which is specific to individual DNS providers
                                             properties:
                                               name:
+                                                nullable: true
                                                 type: string
                                               value:
+                                                nullable: true
                                                 type: string
-                                            required:
-                                            - name
-                                            - value
                                             type: object
+                                          nullable: true
                                           type: array
                                         recordTTL:
+                                          description: TTL for the record
                                           format: int64
+                                          nullable: true
                                           type: integer
                                         recordType:
+                                          description: RecordType type of record, e.g. CNAME, A, AAAA, SRV, TXT etc
+                                          nullable: true
                                           type: string
                                         setIdentifier:
+                                          description: Identifier to distinguish multiple records with the same name and type (e.g. Route53 records with routing policies other than 'simple')
+                                          nullable: true
                                           type: string
                                         targets:
+                                          description: The targets the DNS record points to
                                           items:
                                             type: string
+                                          nullable: true
                                           type: array
-                                      required:
-                                      - dnsName
-                                      - labels
-                                      - providerSpecific
-                                      - recordTTL
-                                      - recordType
-                                      - setIdentifier
-                                      - targets
                                       type: object
+                                    nullable: true
                                     type: array
-                                required:
-                                - endpoints
                                 type: object
                             required:
                             - spec
@@ -4254,6 +4292,735 @@ spec:
                 default: auto
                 description: The protocol used by cloudflared. Defaults to "auto".
                 type: string
+              serviceMonitor:
+                description: |-
+                  If present, creates a ServiceMonitor, and corresponding Service,
+                  to monitor the Deployment. The Prometheus Operator must be present
+                  in the cluster.
+                nullable: true
+                properties:
+                  config:
+                    description: '"selector", "namespaceSelector" and "endpoints" are ignored'
+                    nullable: true
+                    properties:
+                      attachMetadata:
+                        nullable: true
+                        properties:
+                          node:
+                            nullable: true
+                            type: boolean
+                        type: object
+                      bodySizeLimit:
+                        nullable: true
+                        type: string
+                      convertClassicHistogramsToNHCB:
+                        nullable: true
+                        type: boolean
+                      endpoints:
+                        items:
+                          properties:
+                            authorization:
+                              nullable: true
+                              properties:
+                                credentials:
+                                  nullable: true
+                                  properties:
+                                    key:
+                                      type: string
+                                    name:
+                                      nullable: true
+                                      type: string
+                                    optional:
+                                      nullable: true
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                type:
+                                  nullable: true
+                                  type: string
+                              type: object
+                            basicAuth:
+                              nullable: true
+                              properties:
+                                password:
+                                  nullable: true
+                                  properties:
+                                    key:
+                                      type: string
+                                    name:
+                                      nullable: true
+                                      type: string
+                                    optional:
+                                      nullable: true
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                username:
+                                  nullable: true
+                                  properties:
+                                    key:
+                                      type: string
+                                    name:
+                                      nullable: true
+                                      type: string
+                                    optional:
+                                      nullable: true
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                              type: object
+                            bearerTokenFile:
+                              nullable: true
+                              type: string
+                            bearerTokenSecret:
+                              nullable: true
+                              properties:
+                                key:
+                                  type: string
+                                name:
+                                  nullable: true
+                                  type: string
+                                optional:
+                                  nullable: true
+                                  type: boolean
+                              required:
+                              - key
+                              type: object
+                            enableHttp2:
+                              nullable: true
+                              type: boolean
+                            filterRunning:
+                              nullable: true
+                              type: boolean
+                            followRedirects:
+                              nullable: true
+                              type: boolean
+                            honorLabels:
+                              nullable: true
+                              type: boolean
+                            honorTimestamps:
+                              nullable: true
+                              type: boolean
+                            interval:
+                              nullable: true
+                              type: string
+                            metricRelabelings:
+                              items:
+                                properties:
+                                  action:
+                                    enum:
+                                    - replace
+                                    - Replace
+                                    - keep
+                                    - Keep
+                                    - drop
+                                    - Drop
+                                    - hashmod
+                                    - HashMod
+                                    - labelmap
+                                    - LabelMap
+                                    - labeldrop
+                                    - LabelDrop
+                                    - labelkeep
+                                    - LabelKeep
+                                    - lowercase
+                                    - Lowercase
+                                    - uppercase
+                                    - Uppercase
+                                    - keepequal
+                                    - KeepEqual
+                                    - dropequal
+                                    - DropEqual
+                                    - null
+                                    nullable: true
+                                    type: string
+                                  modulus:
+                                    format: int64
+                                    nullable: true
+                                    type: integer
+                                  regex:
+                                    nullable: true
+                                    type: string
+                                  replacement:
+                                    nullable: true
+                                    type: string
+                                  separator:
+                                    nullable: true
+                                    type: string
+                                  sourceLabels:
+                                    items:
+                                      type: string
+                                    nullable: true
+                                    type: array
+                                  targetLabel:
+                                    nullable: true
+                                    type: string
+                                type: object
+                              nullable: true
+                              type: array
+                            noProxy:
+                              nullable: true
+                              type: string
+                            oauth2:
+                              nullable: true
+                              properties:
+                                clientId:
+                                  properties:
+                                    configMap:
+                                      nullable: true
+                                      properties:
+                                        key:
+                                          type: string
+                                        name:
+                                          nullable: true
+                                          type: string
+                                        optional:
+                                          nullable: true
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                    secret:
+                                      nullable: true
+                                      properties:
+                                        key:
+                                          type: string
+                                        name:
+                                          nullable: true
+                                          type: string
+                                        optional:
+                                          nullable: true
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                  type: object
+                                clientSecret:
+                                  properties:
+                                    key:
+                                      type: string
+                                    name:
+                                      nullable: true
+                                      type: string
+                                    optional:
+                                      nullable: true
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                endpointParams:
+                                  additionalProperties:
+                                    type: string
+                                  nullable: true
+                                  type: object
+                                noProxy:
+                                  nullable: true
+                                  type: string
+                                proxyConnectHeader:
+                                  additionalProperties:
+                                    items:
+                                      properties:
+                                        key:
+                                          type: string
+                                        name:
+                                          nullable: true
+                                          type: string
+                                        optional:
+                                          nullable: true
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                    type: array
+                                  nullable: true
+                                  type: object
+                                proxyFromEnvironment:
+                                  nullable: true
+                                  type: boolean
+                                proxyUrl:
+                                  nullable: true
+                                  type: string
+                                scopes:
+                                  items:
+                                    type: string
+                                  nullable: true
+                                  type: array
+                                tlsConfig:
+                                  nullable: true
+                                  properties:
+                                    ca:
+                                      nullable: true
+                                      properties:
+                                        configMap:
+                                          nullable: true
+                                          properties:
+                                            key:
+                                              type: string
+                                            name:
+                                              nullable: true
+                                              type: string
+                                            optional:
+                                              nullable: true
+                                              type: boolean
+                                          required:
+                                          - key
+                                          type: object
+                                        secret:
+                                          nullable: true
+                                          properties:
+                                            key:
+                                              type: string
+                                            name:
+                                              nullable: true
+                                              type: string
+                                            optional:
+                                              nullable: true
+                                              type: boolean
+                                          required:
+                                          - key
+                                          type: object
+                                      type: object
+                                    cert:
+                                      nullable: true
+                                      properties:
+                                        configMap:
+                                          nullable: true
+                                          properties:
+                                            key:
+                                              type: string
+                                            name:
+                                              nullable: true
+                                              type: string
+                                            optional:
+                                              nullable: true
+                                              type: boolean
+                                          required:
+                                          - key
+                                          type: object
+                                        secret:
+                                          nullable: true
+                                          properties:
+                                            key:
+                                              type: string
+                                            name:
+                                              nullable: true
+                                              type: string
+                                            optional:
+                                              nullable: true
+                                              type: boolean
+                                          required:
+                                          - key
+                                          type: object
+                                      type: object
+                                    insecureSkipVerify:
+                                      nullable: true
+                                      type: boolean
+                                    keySecret:
+                                      nullable: true
+                                      properties:
+                                        key:
+                                          type: string
+                                        name:
+                                          nullable: true
+                                          type: string
+                                        optional:
+                                          nullable: true
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                    maxVersion:
+                                      enum:
+                                      - TLS10
+                                      - TLS11
+                                      - TLS12
+                                      - TLS13
+                                      - null
+                                      nullable: true
+                                      type: string
+                                    minVersion:
+                                      enum:
+                                      - TLS10
+                                      - TLS11
+                                      - TLS12
+                                      - TLS13
+                                      - null
+                                      nullable: true
+                                      type: string
+                                    serverName:
+                                      nullable: true
+                                      type: string
+                                  type: object
+                                tokenUrl:
+                                  type: string
+                              required:
+                              - clientId
+                              - clientSecret
+                              - tokenUrl
+                              type: object
+                            params:
+                              additionalProperties:
+                                items:
+                                  type: string
+                                type: array
+                              nullable: true
+                              type: object
+                            path:
+                              nullable: true
+                              type: string
+                            port:
+                              nullable: true
+                              type: string
+                            proxyConnectHeader:
+                              additionalProperties:
+                                items:
+                                  properties:
+                                    key:
+                                      type: string
+                                    name:
+                                      nullable: true
+                                      type: string
+                                    optional:
+                                      nullable: true
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                type: array
+                              nullable: true
+                              type: object
+                            proxyFromEnvironment:
+                              nullable: true
+                              type: boolean
+                            proxyUrl:
+                              nullable: true
+                              type: string
+                            relabelings:
+                              items:
+                                properties:
+                                  action:
+                                    enum:
+                                    - replace
+                                    - Replace
+                                    - keep
+                                    - Keep
+                                    - drop
+                                    - Drop
+                                    - hashmod
+                                    - HashMod
+                                    - labelmap
+                                    - LabelMap
+                                    - labeldrop
+                                    - LabelDrop
+                                    - labelkeep
+                                    - LabelKeep
+                                    - lowercase
+                                    - Lowercase
+                                    - uppercase
+                                    - Uppercase
+                                    - keepequal
+                                    - KeepEqual
+                                    - dropequal
+                                    - DropEqual
+                                    - null
+                                    nullable: true
+                                    type: string
+                                  modulus:
+                                    format: int64
+                                    nullable: true
+                                    type: integer
+                                  regex:
+                                    nullable: true
+                                    type: string
+                                  replacement:
+                                    nullable: true
+                                    type: string
+                                  separator:
+                                    nullable: true
+                                    type: string
+                                  sourceLabels:
+                                    items:
+                                      type: string
+                                    nullable: true
+                                    type: array
+                                  targetLabel:
+                                    nullable: true
+                                    type: string
+                                type: object
+                              nullable: true
+                              type: array
+                            scheme:
+                              enum:
+                              - http
+                              - https
+                              - HTTP
+                              - HTTPS
+                              - null
+                              nullable: true
+                              type: string
+                            scrapeTimeout:
+                              nullable: true
+                              type: string
+                            targetPort:
+                              description: IntOrString is a type that can hold an int32 or a string.  When used in JSON or YAML marshalling and unmarshalling, it produces or consumes the inner type.  This allows you to have, for example, a JSON field that can accept a name or number.
+                              nullable: true
+                              x-kubernetes-int-or-string: true
+                            tlsConfig:
+                              nullable: true
+                              properties:
+                                ca:
+                                  nullable: true
+                                  properties:
+                                    configMap:
+                                      nullable: true
+                                      properties:
+                                        key:
+                                          type: string
+                                        name:
+                                          nullable: true
+                                          type: string
+                                        optional:
+                                          nullable: true
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                    secret:
+                                      nullable: true
+                                      properties:
+                                        key:
+                                          type: string
+                                        name:
+                                          nullable: true
+                                          type: string
+                                        optional:
+                                          nullable: true
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                  type: object
+                                caFile:
+                                  nullable: true
+                                  type: string
+                                cert:
+                                  nullable: true
+                                  properties:
+                                    configMap:
+                                      nullable: true
+                                      properties:
+                                        key:
+                                          type: string
+                                        name:
+                                          nullable: true
+                                          type: string
+                                        optional:
+                                          nullable: true
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                    secret:
+                                      nullable: true
+                                      properties:
+                                        key:
+                                          type: string
+                                        name:
+                                          nullable: true
+                                          type: string
+                                        optional:
+                                          nullable: true
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                  type: object
+                                certFile:
+                                  nullable: true
+                                  type: string
+                                insecureSkipVerify:
+                                  nullable: true
+                                  type: boolean
+                                keyFile:
+                                  nullable: true
+                                  type: string
+                                keySecret:
+                                  nullable: true
+                                  properties:
+                                    key:
+                                      type: string
+                                    name:
+                                      nullable: true
+                                      type: string
+                                    optional:
+                                      nullable: true
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                maxVersion:
+                                  enum:
+                                  - TLS10
+                                  - TLS11
+                                  - TLS12
+                                  - TLS13
+                                  - null
+                                  nullable: true
+                                  type: string
+                                minVersion:
+                                  enum:
+                                  - TLS10
+                                  - TLS11
+                                  - TLS12
+                                  - TLS13
+                                  - null
+                                  nullable: true
+                                  type: string
+                                serverName:
+                                  nullable: true
+                                  type: string
+                              type: object
+                            trackTimestampsStaleness:
+                              nullable: true
+                              type: boolean
+                          type: object
+                        type: array
+                      fallbackScrapeProtocol:
+                        enum:
+                        - PrometheusProto
+                        - OpenMetricsText0.0.1
+                        - OpenMetricsText1.0.0
+                        - PrometheusText0.0.4
+                        - PrometheusText1.0.0
+                        - null
+                        nullable: true
+                        type: string
+                      jobLabel:
+                        nullable: true
+                        type: string
+                      keepDroppedTargets:
+                        format: int64
+                        nullable: true
+                        type: integer
+                      labelLimit:
+                        format: int64
+                        nullable: true
+                        type: integer
+                      labelNameLengthLimit:
+                        format: int64
+                        nullable: true
+                        type: integer
+                      labelValueLengthLimit:
+                        format: int64
+                        nullable: true
+                        type: integer
+                      namespaceSelector:
+                        nullable: true
+                        properties:
+                          any:
+                            nullable: true
+                            type: boolean
+                          matchNames:
+                            items:
+                              type: string
+                            nullable: true
+                            type: array
+                        type: object
+                      nativeHistogramBucketLimit:
+                        format: int64
+                        nullable: true
+                        type: integer
+                      nativeHistogramMinBucketFactor:
+                        description: IntOrString is a type that can hold an int32 or a string.  When used in JSON or YAML marshalling and unmarshalling, it produces or consumes the inner type.  This allows you to have, for example, a JSON field that can accept a name or number.
+                        nullable: true
+                        x-kubernetes-int-or-string: true
+                      podTargetLabels:
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
+                      sampleLimit:
+                        format: int64
+                        nullable: true
+                        type: integer
+                      scrapeClass:
+                        nullable: true
+                        type: string
+                      scrapeClassicHistograms:
+                        nullable: true
+                        type: boolean
+                      scrapeNativeHistograms:
+                        nullable: true
+                        type: boolean
+                      scrapeProtocols:
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
+                      selector:
+                        properties:
+                          matchExpressions:
+                            items:
+                              properties:
+                                key:
+                                  type: string
+                                operator:
+                                  type: string
+                                values:
+                                  items:
+                                    type: string
+                                  nullable: true
+                                  type: array
+                              required:
+                              - key
+                              - operator
+                              type: object
+                            nullable: true
+                            type: array
+                          matchLabels:
+                            additionalProperties:
+                              type: string
+                            nullable: true
+                            type: object
+                        type: object
+                      selectorMechanism:
+                        enum:
+                        - RelabelConfig
+                        - RoleSelector
+                        - null
+                        nullable: true
+                        type: string
+                      serviceDiscoveryRole:
+                        enum:
+                        - Endpoints
+                        - EndpointSlice
+                        - null
+                        nullable: true
+                        type: string
+                      targetLabels:
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
+                      targetLimit:
+                        format: int64
+                        nullable: true
+                        type: integer
+                    required:
+                    - endpoints
+                    - selector
+                    type: object
+                  namespace:
+                    description: |-
+                      The namespace to create the service monitor in, defaults to the same namespace
+                      as the operator. The corresponding metrics Service is always created in the
+                      namespace of the operator, since that's where the Deployment lives.
+                    nullable: true
+                    type: string
+                type: object
               serviceRef:
                 description: |-
                   The service whose endpoint slices are used to identify nodes serving traffic
@@ -4314,16 +5081,21 @@ spec:
                   - status
                   - type
                   type: object
+                nullable: true
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               dnsEndpointNamespace:
+                nullable: true
+                type: string
+              serviceMonitorNamespace:
                 nullable: true
                 type: string
               tunnelId:
                 description: Cloudflare Tunnel ID
                 nullable: true
                 type: string
-            required:
-            - conditions
             type: object
         required:
         - spec
