@@ -29,7 +29,7 @@ use k8s_openapi::{
             NodeSelector, NodeSelectorRequirement, NodeSelectorTerm, PodDNSConfig,
             PodSecurityContext, PodSpec, PodTemplateSpec, Probe, ResourceFieldSelector,
             SeccompProfile, Secret, SecretVolumeSource, SecurityContext, Service, ServicePort,
-            ServiceSpec, Toleration, TopologySpreadConstraint, Volume, VolumeMount,
+            ServiceSpec, Sysctl, Toleration, TopologySpreadConstraint, Volume, VolumeMount,
         },
         discovery::v1::EndpointSlice,
     },
@@ -147,22 +147,15 @@ pub struct CfdTunnelSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, KubeSchema, Default)]
 pub struct CfdTunnelStatus {
     /// Cloudflare Tunnel ID
-    #[serde(rename = "tunnelId", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "tunnelId")]
     pub tunnel_id: Option<String>,
     /// Contains only one condition, Ready, which is set to True
     /// once the tunnel has been configured on Cloudflare
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[x_kube(merge_strategy = MergeStrategy::ListType(ListMerge::Map(vec!["type".into()])))]
     pub conditions: Option<Vec<Condition>>,
-    #[serde(
-        rename = "dnsEndpointNamespace",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "dnsEndpointNamespace")]
     pub dnsendpoint_namespace: Option<String>,
-    #[serde(
-        rename = "serviceMonitorNamespace",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "serviceMonitorNamespace")]
     pub servicemonitor_namespace: Option<String>,
 }
 
@@ -383,51 +376,11 @@ pub async fn run_once(
         tunnel.clone(),
         {
             let ctx = ctx.clone();
-            let tunnel = tunnel.clone();
-            let crd_api = crd_api.clone();
-
             |event| async move {
-                let result = {
-                    let ctx = ctx.clone();
-                    match event {
-                        finalizer::Event::Apply(tunnel) => reconcile(tunnel, ctx).await,
-                        finalizer::Event::Cleanup(tunnel) => cleanup(tunnel, ctx).await,
-                    }
-                };
-
-                let ready_cond = ready_condition(
-                    tunnel.metadata.generation,
-                    tunnel
-                        .status
-                        .as_ref()
-                        .and_then(|status| status.tunnel_id.as_ref())
-                        .is_some(),
-                );
-                let reconciled_cond = reconciled_condition(
-                    tunnel.metadata.generation,
-                    match result {
-                        Ok(_) => ReconcileStatus::Reconciled,
-                        Err(ref err) => ReconcileStatus::Failed(err),
-                    },
-                );
-                let patch = Patch::Apply(json!({
-                    "apiVersion": CfdTunnel::api_version(&()),
-                    "kind": "CfdTunnel",
-                    "status": {
-                        "conditions": [ready_cond, reconciled_cond]
-                    }
-                }));
-                debug!(?patch, "patch status");
-
-                if !ctx.dry_run {
-                    let pp = PatchParams::apply(&ctx.name).force();
-                    crd_api
-                        .patch_status(&tunnel.name_any(), &pp, &patch)
-                        .await
-                        .map_err(Error::Patch)?;
+                match event {
+                    finalizer::Event::Apply(tunnel) => reconcile(tunnel, ctx).await,
+                    finalizer::Event::Cleanup(tunnel) => cleanup(tunnel, ctx).await,
                 }
-
-                result
             }
         },
     )
@@ -472,475 +425,515 @@ pub async fn reconcile(mut tunnel: Arc<CfdTunnel>, ctx: Arc<Context>) -> Result<
     );
     let pp = PatchParams::apply(&ctx.name);
 
-    if tunnel
-        .status
-        .as_ref()
-        .and_then(|status| status.tunnel_id.as_ref())
-        .is_none()
-    {
-        let cf_client = cf_client_for_tunnel(&ctx, &tunnel).await?;
-        let tunnel_name = format!(
-            "{}:{}/{}",
-            ctx.name,
-            tunnel.namespace().expect("namespaced"),
-            tunnel.name_any(),
-        );
+    let result = {
+        let mut recreate_deployment = false;
 
-        let mut credentials = CfdTunnelCredentialsFile {
-            account_tag: tunnel.spec.account_id.clone(),
-            tunnel_id: "".into(),
-            tunnel_secret: vec![0; 32],
-            endpoint: "".into(),
-        };
-        rand::fill(credentials.tunnel_secret.as_mut_slice());
+        if tunnel
+            .status
+            .as_ref()
+            .and_then(|status| status.tunnel_id.as_ref())
+            .is_none()
+        {
+            recreate_deployment = true; // cloudflared must restart to pick up the new secret
 
-        let credentials_secret = generate_owned_credentials_secret(&ctx, &tunnel, &credentials);
-        trace!(
-            secret_name = credentials_secret.name_any(),
-            "generate secret: {credentials_secret:#?}"
-        );
-        debug!(
-            secret_name = credentials_secret.name_any(),
-            "patch secret with new tunnel secret"
-        );
+            let cf_client = cf_client_for_tunnel(&ctx, &tunnel).await?;
+            let tunnel_name = format!(
+                "{}:{}/{}",
+                ctx.name,
+                tunnel.namespace().expect("namespaced"),
+                tunnel.name_any(),
+            );
 
-        if !ctx.dry_run {
-            secret_api
-                .patch(
-                    &credentials_secret.name_any(),
-                    &pp,
-                    &Patch::Apply(credentials_secret),
-                )
-                .await
-                .map_err(Error::Patch)?;
-        }
+            let mut credentials = CfdTunnelCredentialsFile {
+                account_tag: tunnel.spec.account_id.clone(),
+                tunnel_id: "".into(),
+                tunnel_secret: vec![0; 32],
+                endpoint: "".into(),
+            };
+            rand::fill(credentials.tunnel_secret.as_mut_slice());
 
-        let cfd_tunnel_id = {
-            let existing_tunnel = {
-                let list_tunnels = list_tunnels::ListTunnels {
-                    account_identifier: &tunnel.spec.account_id,
-                    params: list_tunnels::Params {
-                        name: Some(tunnel_name.clone()),
-                        ..Default::default()
-                    },
-                };
-                debug!(request = ?list_tunnels, "list tunnels");
-                let result = cf_client
-                    .request(&list_tunnels)
+            let credentials_secret = generate_owned_credentials_secret(&ctx, &tunnel, &credentials);
+            trace!(
+                secret_name = credentials_secret.name_any(),
+                "generate secret: {credentials_secret:#?}"
+            );
+            debug!(
+                secret_name = credentials_secret.name_any(),
+                "patch secret with new tunnel secret"
+            );
+
+            if !ctx.dry_run {
+                secret_api
+                    .patch(
+                        &credentials_secret.name_any(),
+                        &pp,
+                        &Patch::Apply(credentials_secret),
+                    )
                     .await
-                    .map_err(Error::CfTunnel)?;
+                    .map_err(Error::Patch)?;
+            }
 
-                match result.result.first() {
-                    None => None,
-                    Some(cfd_tunnel) => {
-                        let update_tunnel = update_tunnel::UpdateTunnel {
+            let cfd_tunnel_id = {
+                let existing_tunnel = {
+                    let list_tunnels = list_tunnels::ListTunnels {
+                        account_identifier: &tunnel.spec.account_id,
+                        params: list_tunnels::Params {
+                            name: Some(tunnel_name.clone()),
+                            ..Default::default()
+                        },
+                    };
+                    debug!(request = ?list_tunnels, "list tunnels");
+                    let result = cf_client
+                        .request(&list_tunnels)
+                        .await
+                        .map_err(Error::CfTunnel)?;
+
+                    match result.result.first() {
+                        None => None,
+                        Some(cfd_tunnel) => {
+                            let update_tunnel = update_tunnel::UpdateTunnel {
+                                account_identifier: &tunnel.spec.account_id,
+                                tunnel_id: &cfd_tunnel.id.to_string(),
+                                params: update_tunnel::Params {
+                                    name: &tunnel_name,
+                                    tunnel_secret: &credentials.tunnel_secret,
+                                    metadata: None,
+                                },
+                            };
+                            debug!(
+                                request = ?update_tunnel,
+                                "found existing tunnel, updating tunnel secret"
+                            );
+
+                            if !ctx.dry_run {
+                                cf_client
+                                    .request(&update_tunnel)
+                                    .await
+                                    .map_err(Error::CfTunnel)?;
+                            }
+
+                            Some(cfd_tunnel.id.to_string())
+                        }
+                    }
+                };
+
+                match existing_tunnel {
+                    None => {
+                        let create_tunnel = create_tunnel::CreateTunnel {
                             account_identifier: &tunnel.spec.account_id,
-                            tunnel_id: &cfd_tunnel.id.to_string(),
-                            params: update_tunnel::Params {
-                                name: &tunnel_name,
+                            params: create_tunnel::Params {
                                 tunnel_secret: &credentials.tunnel_secret,
+                                name: &tunnel_name,
+                                config_src: &cfd_tunnel::ConfigurationSrc::Local,
                                 metadata: None,
                             },
                         };
-                        debug!(
-                            request = ?update_tunnel,
-                            "found existing tunnel, updating tunnel secret"
-                        );
+                        debug!(request = ?create_tunnel, "create tunnel");
 
                         if !ctx.dry_run {
-                            cf_client
-                                .request(&update_tunnel)
+                            let new_tunnel = cf_client
+                                .request(&create_tunnel)
                                 .await
                                 .map_err(Error::CfTunnel)?;
-                        }
 
-                        Some(cfd_tunnel.id.to_string())
+                            new_tunnel.result.id.to_string()
+                        } else {
+                            "dry_run".into()
+                        }
                     }
+                    Some(cfd_tunnel) => cfd_tunnel,
                 }
             };
 
-            match existing_tunnel {
-                None => {
-                    let create_tunnel = create_tunnel::CreateTunnel {
-                        account_identifier: &tunnel.spec.account_id,
-                        params: create_tunnel::Params {
-                            tunnel_secret: &credentials.tunnel_secret,
-                            name: &tunnel_name,
-                            config_src: &cfd_tunnel::ConfigurationSrc::Local,
-                            metadata: None,
-                        },
-                    };
-                    debug!(request = ?create_tunnel, "create tunnel");
-
-                    if !ctx.dry_run {
-                        let new_tunnel = cf_client
-                            .request(&create_tunnel)
-                            .await
-                            .map_err(Error::CfTunnel)?;
-
-                        new_tunnel.result.id.to_string()
-                    } else {
-                        "dry_run".into()
-                    }
-                }
-                Some(cfd_tunnel) => cfd_tunnel,
-            }
-        };
-
-        credentials.tunnel_id = cfd_tunnel_id.clone();
-        let credentials_secret = generate_owned_credentials_secret(&ctx, &tunnel, &credentials);
-        trace!(
-            secret_name = credentials_secret.name_any(),
-            "generate secret: {credentials_secret:#?}"
-        );
-        debug!(
-            secret_name = credentials_secret.name_any(),
-            tunnel_id = credentials.tunnel_id,
-            "patch secret with tunnel id"
-        );
-
-        if !ctx.dry_run {
-            secret_api
-                .patch(
-                    &credentials_secret.name_any(),
-                    &pp,
-                    &Patch::Apply(credentials_secret.clone()),
-                )
-                .await
-                .map_err(Error::Patch)?;
-        }
-
-        cleanup_old_resources(&ctx, &tunnel, &ctx.namespace, [&credentials_secret]).await?;
-
-        let patch = Patch::Apply(json!({
-            "status": {
-                "tunnel_id": cfd_tunnel_id.clone(),
-            }
-        }));
-        debug!(patch = ?patch, "patch status with tunnel id");
-
-        if !ctx.dry_run {
-            let pp = PatchParams::apply(&ctx.name).force();
-            tunnel = Arc::new(
-                crd_api
-                    .patch_status(&tunnel.name_any(), &pp, &patch)
-                    .await
-                    .map_err(Error::Patch)?,
+            credentials.tunnel_id = cfd_tunnel_id.clone();
+            let credentials_secret = generate_owned_credentials_secret(&ctx, &tunnel, &credentials);
+            trace!(
+                secret_name = credentials_secret.name_any(),
+                "generate secret: {credentials_secret:#?}"
             );
-        } else {
+            debug!(
+                secret_name = credentials_secret.name_any(),
+                tunnel_id = credentials.tunnel_id,
+                "patch secret with tunnel id"
+            );
+
+            if !ctx.dry_run {
+                secret_api
+                    .patch(
+                        &credentials_secret.name_any(),
+                        &pp,
+                        &Patch::Apply(credentials_secret.clone()),
+                    )
+                    .await
+                    .map_err(Error::Patch)?;
+            }
+
+            cleanup_old_resources(&ctx, &tunnel, &ctx.namespace, [&credentials_secret]).await?;
+
             let new_status = CfdTunnelStatus {
                 tunnel_id: Some(cfd_tunnel_id),
                 ..tunnel.status.as_ref().cloned().unwrap_or_default()
             };
+
+            let patch = Patch::Apply(json!({
+                "apiVersion": CfdTunnel::api_version(&()),
+                "kind": CfdTunnel::kind(&()),
+                "status": new_status.clone(),
+            }));
+            debug!(patch = ?patch, "patch status with tunnel id");
+
+            if !ctx.dry_run {
+                let pp = PatchParams::apply(&ctx.name).force();
+                tunnel = Arc::new(
+                    crd_api
+                        .patch_status(&tunnel.name_any(), &pp, &patch)
+                        .await
+                        .map_err(Error::Patch)?,
+                );
+            }
+
             let mut new_tunnel = (*tunnel).clone();
             new_tunnel.status = Some(new_status);
             tunnel = Arc::new(new_tunnel);
         }
-    }
 
-    let tunnel_id = tunnel
-        .status
-        .as_ref()
-        .and_then(|status| status.tunnel_id.as_ref())
-        .expect("tunnel_id");
+        let tunnel_id = tunnel
+            .status
+            .as_ref()
+            .and_then(|status| status.tunnel_id.as_ref())
+            .expect("tunnel_id")
+            .clone();
 
-    let configmap = generate_owned_configmap(&ctx, &tunnel, tunnel_id);
-    trace!(
-        configmap_name = configmap.name_any(),
-        "generate configmap: {configmap:#?}"
-    );
-    debug!(configmap_name = configmap.name_any(), "patch configmap");
-
-    if !ctx.dry_run {
-        configmap_api
-            .patch(&configmap.name_any(), &pp, &Patch::Apply(configmap.clone()))
-            .await
-            .map_err(Error::Patch)?;
-    }
-
-    let endpointslices = endpointslice_api
-        .list(&ListParams::default().labels(&format!(
-            "kubernetes.io/service-name={}",
-            &tunnel.spec.service_ref.name
-        )))
-        .await
-        .map_err(Error::List)?;
-    trace!(endpointslices = ?endpointslices, "found endpoint slices");
-
-    let mut node_names: Vec<_> = endpointslices
-        .iter()
-        .flat_map(|slice| {
-            slice
-                .endpoints
-                .iter()
-                .filter(|endpoint| {
-                    endpoint
-                        .conditions
-                        .as_ref()
-                        // Only consider endpoints that are not terminating
-                        .and_then(|conditions| conditions.terminating.or(Some(false)).map(|c| !c))
-                        .unwrap_or_default()
-                })
-                .map(|endpoint| endpoint.node_name.clone())
-        })
-        .flatten()
-        .collect();
-    node_names.sort();
-    node_names.dedup();
-    debug!(node_names = ?node_names, "resolved nodes");
-
-    let metrics_sock_addr: SocketAddr = tunnel
-        .spec
-        .metrics_addr
-        .parse()
-        .map_err(anyhow::Error::from)?;
-
-    let deployment = generate_owned_deployment(
-        &ctx,
-        &tunnel,
-        tunnel_id,
-        &node_names,
-        &configmap.name_any(),
-        &base_resource_name(&tunnel),
-        &metrics_sock_addr,
-    );
-    trace!(
-        deployment_name = deployment.name_any(),
-        "generate deployment: {deployment:#?}"
-    );
-    debug!(deployment_name = deployment.name_any(), "patch deployment");
-
-    if !ctx.dry_run {
-        deployment_api
-            .patch(
-                &deployment.name_any(),
-                &pp,
-                &Patch::Apply(deployment.clone()),
-            )
-            .await
-            .map_err(Error::Patch)?;
-    }
-
-    let dnsendpoint = tunnel.spec.dns.as_ref().map(|dns| {
-        let dnsendpoint = generated_owned_dnsendpoint(&ctx, &tunnel, tunnel_id, dns);
+        let configmap = generate_owned_configmap(&ctx, &tunnel, &tunnel_id);
         trace!(
-            dnsendpoint_name = dnsendpoint.name_any(),
-            "generate dnsendpoint: {dnsendpoint:#?}"
+            configmap_name = configmap.name_any(),
+            "generate configmap: {configmap:#?}"
         );
-
-        dnsendpoint
-    });
-
-    if let Some(ref dnsendpoint) = dnsendpoint {
-        let dnsendpoint_api: Api<DNSEndpoint> = Api::namespaced(
-            ctx.k8s_client.clone(),
-            dnsendpoint.namespace().as_ref().expect("namespaced"),
-        );
-
-        debug!(
-            dnsendpoint_name = dnsendpoint.name_any(),
-            "patch dnsendpoint"
-        );
+        debug!(configmap_name = configmap.name_any(), "patch configmap");
 
         if !ctx.dry_run {
-            dnsendpoint_api
-                .patch(
-                    &dnsendpoint.name_any(),
-                    &pp,
-                    &Patch::Apply(dnsendpoint.clone()),
-                )
-                .await
-                .map_err(Error::Patch)?;
-        }
-    }
-
-    let servicemonitor = tunnel
-        .spec
-        .servicemonitor
-        .as_ref()
-        .map(|cfdservicemonitor| {
-            let servicemonitor = generated_owned_servicemonitor(&ctx, &tunnel, cfdservicemonitor);
-            trace!(
-                servicemonitor_name = servicemonitor.name_any(),
-                "generate servicemonitor: {servicemonitor:#?}"
-            );
-
-            let service = generated_owned_metrics_service(&ctx, &tunnel, &metrics_sock_addr);
-            trace!(
-                service_name = service.name_any(),
-                "generate metrics service: {service:#?}"
-            );
-
-            (servicemonitor, service)
-        });
-
-    if let Some((ref servicemonitor, ref service)) = servicemonitor {
-        let service_api: Api<Service> = Api::namespaced(
-            ctx.k8s_client.clone(),
-            service.namespace().as_ref().expect("namespaced"),
-        );
-        let servicemonitor_api: Api<ServiceMonitor> = Api::namespaced(
-            ctx.k8s_client.clone(),
-            servicemonitor.namespace().as_ref().expect("namespaced"),
-        );
-
-        debug!(service_name = service.name_any(), "patch metrics service");
-
-        if !ctx.dry_run {
-            service_api
-                .patch(&service.name_any(), &pp, &Patch::Apply(service.clone()))
+            configmap_api
+                .patch(&configmap.name_any(), &pp, &Patch::Apply(configmap.clone()))
                 .await
                 .map_err(Error::Patch)?;
         }
 
-        debug!(
-            servicemonitor_name = servicemonitor.name_any(),
-            "patch servicemonitor"
-        );
+        let endpointslices = endpointslice_api
+            .list(&ListParams::default().labels(&format!(
+                "kubernetes.io/service-name={}",
+                &tunnel.spec.service_ref.name
+            )))
+            .await
+            .map_err(Error::List)?;
+        trace!(endpointslices = ?endpointslices, "found endpoint slices");
 
-        if !ctx.dry_run {
-            servicemonitor_api
-                .patch(
-                    &servicemonitor.name_any(),
-                    &pp,
-                    &Patch::Apply(servicemonitor.clone()),
-                )
-                .await
-                .map_err(Error::Patch)?;
-        }
-    }
+        let mut node_names: Vec<_> = endpointslices
+            .iter()
+            .flat_map(|slice| {
+                slice
+                    .endpoints
+                    .iter()
+                    .filter(|endpoint| {
+                        endpoint
+                            .conditions
+                            .as_ref()
+                            // Only consider endpoints that are not terminating
+                            .and_then(|conditions| {
+                                conditions.terminating.or(Some(false)).map(|c| !c)
+                            })
+                            .unwrap_or_default()
+                    })
+                    .map(|endpoint| endpoint.node_name.clone())
+            })
+            .flatten()
+            .collect();
+        node_names.sort();
+        node_names.dedup();
+        debug!(node_names = ?node_names, "resolved nodes");
 
-    cleanup_old_resources(
-        &ctx,
-        &tunnel,
-        &ctx.namespace,
-        servicemonitor.as_ref().map(|(_, service)| service),
-    )
-    .await?;
+        let metrics_sock_addr: SocketAddr = tunnel
+            .spec
+            .metrics_addr
+            .parse()
+            .map_err(anyhow::Error::from)?;
 
-    let old_servicemonitor_namespace = tunnel
-        .status
-        .as_ref()
-        .and_then(|status| status.servicemonitor_namespace.as_ref());
-    for namespace in servicemonitor
-        .as_ref()
-        .and_then(|(servicemonitor, _)| servicemonitor.metadata.namespace.as_ref())
-        .into_iter()
-        .chain(old_servicemonitor_namespace)
-    {
-        match cleanup_old_resources(
+        let deployment = generate_owned_deployment(
             &ctx,
             &tunnel,
-            namespace,
-            servicemonitor
-                .as_ref()
-                .map(|(servicemonitor, _)| servicemonitor),
+            &tunnel_id,
+            &node_names,
+            &configmap.name_any(),
+            &base_resource_name(&tunnel),
+            &metrics_sock_addr,
+        );
+        trace!(
+            deployment_name = deployment.name_any(),
+            "generate deployment: {deployment:#?}"
+        );
+        debug!(
+            deployment_name = deployment.name_any(),
+            recreate_deployment, "patch deployment"
+        );
+
+        if recreate_deployment {
+            cleanup_old_resources::<Deployment>(&ctx, &tunnel, &ctx.namespace, &[]).await?;
+        }
+
+        if !ctx.dry_run {
+            deployment_api
+                .patch(
+                    &deployment.name_any(),
+                    &pp,
+                    &Patch::Apply(deployment.clone()),
+                )
+                .await
+                .map_err(Error::Patch)?;
+        }
+
+        let dnsendpoint = tunnel.spec.dns.as_ref().map(|dns| {
+            let dnsendpoint = generated_owned_dnsendpoint(&ctx, &tunnel, &tunnel_id, dns);
+            trace!(
+                dnsendpoint_name = dnsendpoint.name_any(),
+                "generate dnsendpoint: {dnsendpoint:#?}"
+            );
+
+            dnsendpoint
+        });
+
+        if let Some(ref dnsendpoint) = dnsendpoint {
+            let dnsendpoint_api: Api<DNSEndpoint> = Api::namespaced(
+                ctx.k8s_client.clone(),
+                dnsendpoint.namespace().as_ref().expect("namespaced"),
+            );
+
+            debug!(
+                dnsendpoint_name = dnsendpoint.name_any(),
+                "patch dnsendpoint"
+            );
+
+            if !ctx.dry_run {
+                dnsendpoint_api
+                    .patch(
+                        &dnsendpoint.name_any(),
+                        &pp,
+                        &Patch::Apply(dnsendpoint.clone()),
+                    )
+                    .await
+                    .map_err(Error::Patch)?;
+            }
+        }
+
+        let servicemonitor = tunnel
+            .spec
+            .servicemonitor
+            .as_ref()
+            .map(|cfdservicemonitor| {
+                let servicemonitor =
+                    generated_owned_servicemonitor(&ctx, &tunnel, cfdservicemonitor);
+                trace!(
+                    servicemonitor_name = servicemonitor.name_any(),
+                    "generate servicemonitor: {servicemonitor:#?}"
+                );
+
+                let service = generated_owned_metrics_service(&ctx, &tunnel, &metrics_sock_addr);
+                trace!(
+                    service_name = service.name_any(),
+                    "generate metrics service: {service:#?}"
+                );
+
+                (servicemonitor, service)
+            });
+
+        if let Some((ref servicemonitor, ref service)) = servicemonitor {
+            let service_api: Api<Service> = Api::namespaced(
+                ctx.k8s_client.clone(),
+                service.namespace().as_ref().expect("namespaced"),
+            );
+            let servicemonitor_api: Api<ServiceMonitor> = Api::namespaced(
+                ctx.k8s_client.clone(),
+                servicemonitor.namespace().as_ref().expect("namespaced"),
+            );
+
+            debug!(service_name = service.name_any(), "patch metrics service");
+
+            if !ctx.dry_run {
+                service_api
+                    .patch(&service.name_any(), &pp, &Patch::Apply(service.clone()))
+                    .await
+                    .map_err(Error::Patch)?;
+            }
+
+            debug!(
+                servicemonitor_name = servicemonitor.name_any(),
+                "patch servicemonitor"
+            );
+
+            if !ctx.dry_run {
+                servicemonitor_api
+                    .patch(
+                        &servicemonitor.name_any(),
+                        &pp,
+                        &Patch::Apply(servicemonitor.clone()),
+                    )
+                    .await
+                    .map_err(Error::Patch)?;
+            }
+        }
+
+        cleanup_old_resources(
+            &ctx,
+            &tunnel,
+            &ctx.namespace,
+            servicemonitor.as_ref().map(|(_, service)| service),
         )
-        .await
+        .await?;
+
+        let old_servicemonitor_namespace = tunnel
+            .status
+            .as_ref()
+            .and_then(|status| status.servicemonitor_namespace.as_ref());
+        for namespace in servicemonitor
+            .as_ref()
+            .and_then(|(servicemonitor, _)| servicemonitor.metadata.namespace.as_ref())
+            .into_iter()
+            .chain(old_servicemonitor_namespace)
         {
-            Ok(()) => {}
-            // The CRD doesn't exist
-            Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => {}
-            Err(err) => return Err(err),
-        };
-    }
+            match cleanup_old_resources(
+                &ctx,
+                &tunnel,
+                namespace,
+                servicemonitor
+                    .as_ref()
+                    .map(|(servicemonitor, _)| servicemonitor),
+            )
+            .await
+            {
+                Ok(()) => {}
+                // The CRD doesn't exist
+                Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => {}
+                Err(err) => return Err(err),
+            };
+        }
 
-    let old_dnsendpoint_namespace = tunnel
-        .status
-        .as_ref()
-        .and_then(|status| status.dnsendpoint_namespace.as_ref());
-    for namespace in dnsendpoint
-        .as_ref()
-        .and_then(|dnsendpoint| dnsendpoint.metadata.namespace.as_ref())
-        .into_iter()
-        .chain(old_dnsendpoint_namespace)
+        let old_dnsendpoint_namespace = tunnel
+            .status
+            .as_ref()
+            .and_then(|status| status.dnsendpoint_namespace.as_ref());
+        for namespace in dnsendpoint
+            .as_ref()
+            .and_then(|dnsendpoint| dnsendpoint.metadata.namespace.as_ref())
+            .into_iter()
+            .chain(old_dnsendpoint_namespace)
+        {
+            match cleanup_old_resources(&ctx, &tunnel, namespace, dnsendpoint.as_ref()).await {
+                Ok(()) => {}
+                // The CRD doesn't exist
+                Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => {}
+                Err(err) => return Err(err),
+            };
+        }
+
+        cleanup_old_resources(&ctx, &tunnel, &ctx.namespace, [&configmap]).await?;
+        cleanup_old_resources(&ctx, &tunnel, &ctx.namespace, [&deployment]).await?;
+
+        let patch = Patch::Apply(json!({
+            "apiVersion": CfdTunnel::api_version(&()),
+            "kind": CfdTunnel::kind(&()),
+            "status": CfdTunnelStatus {
+                dnsendpoint_namespace: dnsendpoint
+                    .as_ref()
+                    .and_then(|dnsendpoint| dnsendpoint.namespace()),
+                servicemonitor_namespace: servicemonitor
+                    .as_ref()
+                    .and_then(|(servicemonitor, _)| servicemonitor.namespace()),
+                ..tunnel.status.as_ref().cloned().unwrap_or_default()
+            }
+        }));
+        debug!(?patch, "patch status with custom resource namespaces");
+
+        if !ctx.dry_run {
+            let pp = PatchParams::apply(&ctx.name).force();
+            crd_api
+                .patch_status(&tunnel.name_any(), &pp, &patch)
+                .await
+                .map_err(Error::Patch)?;
+        }
+
+        Ok(Action::requeue(Duration::from_secs(3600)))
+    };
+
+    patch_conditions(&ctx, &tunnel, &crd_api, &result).await?;
+
+    result
+}
+
+#[instrument(skip(tunnel, ctx))]
+pub async fn cleanup(tunnel: Arc<CfdTunnel>, ctx: Arc<Context>) -> Result<Action> {
+    let crd_api: Api<CfdTunnel> = Api::namespaced(
+        ctx.k8s_client.clone(),
+        &tunnel.namespace().expect("namespaced"),
+    );
+
+    cleanup_old_resources::<Deployment>(&ctx, &tunnel, &ctx.namespace, &[]).await?;
+    cleanup_old_resources::<ConfigMap>(&ctx, &tunnel, &ctx.namespace, &[]).await?;
+    cleanup_old_resources::<Secret>(&ctx, &tunnel, &ctx.namespace, &[]).await?;
+
+    if let Some(CfdTunnelStatus {
+        tunnel_id,
+        conditions: _,
+        dnsendpoint_namespace,
+        servicemonitor_namespace,
+    }) = tunnel.status.as_ref()
     {
-        match cleanup_old_resources(&ctx, &tunnel, namespace, dnsendpoint.as_ref()).await {
-            Ok(()) => {}
-            // The CRD doesn't exist
-            Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => {}
-            Err(err) => return Err(err),
-        };
-    }
+        for namespace in servicemonitor_namespace.iter().chain([&ctx.namespace]) {
+            match cleanup_old_resources::<ServiceMonitor>(&ctx, &tunnel, namespace, &[]).await {
+                Ok(()) => {}
+                // The CRD doesn't exist
+                Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => {}
+                Err(err) => return Err(err),
+            }
+        }
 
-    cleanup_old_resources(&ctx, &tunnel, &ctx.namespace, [&configmap]).await?;
-    cleanup_old_resources(&ctx, &tunnel, &ctx.namespace, [&deployment]).await?;
+        for namespace in dnsendpoint_namespace.iter().chain([&ctx.namespace]) {
+            match cleanup_old_resources::<DNSEndpoint>(&ctx, &tunnel, namespace, &[]).await {
+                Ok(()) => {}
+                // The CRD doesn't exist
+                Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        if let Some(tunnel_id) = tunnel_id {
+            let cf_client = cf_client_for_tunnel(&ctx, &tunnel).await?;
+            let delete_tunnel_request = delete_tunnel::DeleteTunnel {
+                account_identifier: &tunnel.spec.account_id,
+                tunnel_id,
+                params: Default::default(),
+            };
+            debug!(request = ?delete_tunnel_request, "delete tunnel");
+
+            if !ctx.dry_run {
+                cf_client
+                    .request(&delete_tunnel_request)
+                    .await
+                    .map_err(Error::CfTunnel)?;
+            }
+        }
+    }
 
     let patch = Patch::Merge(json!({
-        "status": CfdTunnelStatus {
-            dnsendpoint_namespace: dnsendpoint
-                .as_ref()
-                .and_then(|dnsendpoint| dnsendpoint.namespace()),
-            servicemonitor_namespace: servicemonitor
-                .as_ref()
-                .and_then(|(servicemonitor, _)| servicemonitor.namespace()),
-            ..tunnel.status.as_ref().cloned().unwrap_or_default()
-        }
+        "status": null,
     }));
-    debug!(?patch, "patch status");
-
+    debug!(?patch, "remove status");
     if !ctx.dry_run {
+        let pp = PatchParams::default();
         crd_api
             .patch_status(&tunnel.name_any(), &pp, &patch)
             .await
             .map_err(Error::Patch)?;
     }
 
-    Ok(Action::requeue(Duration::from_secs(3600)))
-}
-
-#[instrument(skip(tunnel, ctx))]
-pub async fn cleanup(tunnel: Arc<CfdTunnel>, ctx: Arc<Context>) -> Result<Action> {
-    cleanup_old_resources::<Deployment>(&ctx, &tunnel, &ctx.namespace, &[]).await?;
-    cleanup_old_resources::<ConfigMap>(&ctx, &tunnel, &ctx.namespace, &[]).await?;
-    cleanup_old_resources::<Secret>(&ctx, &tunnel, &ctx.namespace, &[]).await?;
-
-    match tunnel.status.as_ref() {
-        Some(CfdTunnelStatus {
-            tunnel_id,
-            conditions: _,
-            dnsendpoint_namespace,
-            servicemonitor_namespace,
-        }) => {
-            for namespace in servicemonitor_namespace.iter().chain([&ctx.namespace]) {
-                match cleanup_old_resources::<ServiceMonitor>(&ctx, &tunnel, namespace, &[]).await {
-                    Ok(()) => {}
-                    // The CRD doesn't exist
-                    Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => {}
-                    Err(err) => return Err(err),
-                }
-            }
-
-            for namespace in dnsendpoint_namespace.iter().chain([&ctx.namespace]) {
-                match cleanup_old_resources::<DNSEndpoint>(&ctx, &tunnel, namespace, &[]).await {
-                    Ok(()) => {}
-                    // The CRD doesn't exist
-                    Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => {}
-                    Err(err) => return Err(err),
-                }
-            }
-
-            if let Some(tunnel_id) = tunnel_id {
-                let cf_client = cf_client_for_tunnel(&ctx, &tunnel).await?;
-                let delete_tunnel_request = delete_tunnel::DeleteTunnel {
-                    account_identifier: &tunnel.spec.account_id,
-                    tunnel_id,
-                    params: Default::default(),
-                };
-                debug!(request = ?delete_tunnel_request, "delete tunnel");
-
-                if !ctx.dry_run {
-                    cf_client
-                        .request(&delete_tunnel_request)
-                        .await
-                        .map_err(Error::CfTunnel)?;
-                }
-            }
-
-            Ok(Action::await_change())
-        }
-        _ => Ok(Action::await_change()),
-    }
+    Ok(Action::await_change())
 }
 
 pub fn error_policy(
@@ -973,6 +966,48 @@ pub fn error_policy(
         "failed to reconcile tunnel"
     );
     Action::requeue(Duration::from_secs(30))
+}
+
+async fn patch_conditions(
+    ctx: &Arc<Context>,
+    tunnel: &Arc<CfdTunnel>,
+    crd_api: &Api<CfdTunnel>,
+    result: &Result<Action>,
+) -> Result<()> {
+    let ready_cond = ready_condition(
+        tunnel.metadata.generation,
+        tunnel
+            .status
+            .as_ref()
+            .and_then(|status| status.tunnel_id.as_ref())
+            .is_some(),
+    );
+    let reconciled_cond = reconciled_condition(
+        tunnel.metadata.generation,
+        match result {
+            Ok(_) => ReconcileStatus::Reconciled,
+            Err(err) => ReconcileStatus::Failed(err),
+        },
+    );
+    let patch = Patch::Apply(json!({
+        "apiVersion": CfdTunnel::api_version(&()),
+        "kind": CfdTunnel::kind(&()),
+        "status": CfdTunnelStatus {
+            conditions: Some(vec![ready_cond, reconciled_cond]),
+            ..tunnel.status.as_ref().cloned().unwrap_or_default()
+        }
+    }));
+    debug!(?patch, "patch status with conditions");
+
+    if !ctx.dry_run {
+        let pp = PatchParams::apply(&ctx.name).force();
+        crd_api
+            .patch_status(&tunnel.name_any(), &pp, &patch)
+            .await
+            .map_err(Error::Patch)?;
+    }
+
+    Ok(())
 }
 
 fn generate_owned_credentials_secret(
@@ -1179,6 +1214,12 @@ fn generate_owned_deployment(
         cloudflared_container.merge_from(overrides.clone());
     }
 
+    let uses_host_network = tunnel
+        .spec
+        .pod_spec_overrides
+        .as_ref()
+        .and_then(|s| s.host_network)
+        .unwrap_or_default();
     let mut pod_spec = PodSpec {
         affinity: Some(Affinity {
             node_affinity: match node_names.len() {
@@ -1211,6 +1252,10 @@ fn generate_owned_deployment(
             ..Default::default()
         }]),
         security_context: Some(PodSecurityContext {
+            sysctls: (!uses_host_network).then_some(vec![Sysctl {
+                name: "net.ipv4.ping_group_range".into(),
+                value: "65532 65532".into(),
+            }]),
             run_as_non_root: Some(true),
             seccomp_profile: Some(SeccompProfile {
                 type_: "RuntimeDefault".into(),
