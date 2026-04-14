@@ -18,8 +18,7 @@ use tokio::{
     time::interval,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, level_filters::LevelFilter, trace, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::{error, info, trace, warn};
 
 use operator::CfdTunnel;
 
@@ -33,14 +32,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(
-            tracing_subscriber::filter::EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
+    let operator_namespace = env::var("OPERATOR_NAMESPACE")
+        .expect("OPERATOR_NAMESPACE must be set to the namespace the operator is running in.");
+    let operator_name = env::var("OPERATOR_NAME").unwrap_or(DEFAULT_OPERATOR_NAME.to_string());
+    let _otel_guard = operator::tracing::init_subscriber(&operator_name, &operator_namespace);
 
     let metrics_addr = env::var("METRICS_ADDR")
         .unwrap_or("0.0.0.0:9000".into())
@@ -54,9 +49,6 @@ async fn main() -> anyhow::Result<()> {
     process_collector.describe();
     operator::metrics::describe();
 
-    let operator_name = env::var("OPERATOR_NAME").unwrap_or(DEFAULT_OPERATOR_NAME.to_string());
-    let operator_namespace = env::var("OPERATOR_NAMESPACE")
-        .expect("OPERATOR_NAMESPACE must be set to the namespace the operator is running in.");
     let watch_namespaces = env::var("WATCH_NAMESPACE")
         .map(|env| {
             env.split(",")
