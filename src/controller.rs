@@ -22,7 +22,7 @@ use futures::FutureExt;
 use k8s_openapi::{
     DeepMerge,
     api::{
-        apps::v1::{Deployment, DeploymentSpec},
+        apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
         core::v1::{
             Affinity, Capabilities, ConfigMap, ConfigMapVolumeSource, Container, ContainerPort,
             EnvVar, EnvVarSource, HTTPGetAction, HostAlias, LocalObjectReference, NodeAffinity,
@@ -1307,6 +1307,13 @@ fn generate_owned_deployment(
         },
         spec: Some(DeploymentSpec {
             replicas: Some(node_names.len() as i32),
+            strategy: Some(DeploymentStrategy {
+                type_: Some("RollingUpdate".into()),
+                rolling_update: Some(RollingUpdateDeployment {
+                    max_unavailable: Some(IntOrString::Int(0)),
+                    max_surge: Some(IntOrString::Int(1)),
+                }),
+            }),
             selector: LabelSelector {
                 match_labels: Some(labels.clone()),
                 ..Default::default()
