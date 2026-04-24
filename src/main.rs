@@ -7,7 +7,7 @@ use kube::{
     Api,
     api::ObjectMeta,
     runtime::{
-        Controller, WatchStreamExt, controller, metadata_watcher, predicates,
+        Controller, Predicate, WatchStreamExt, controller, metadata_watcher, predicates,
         reflector::{self, Lookup},
         watcher,
     },
@@ -164,7 +164,10 @@ async fn main() -> anyhow::Result<()> {
         })
         .reflect(crd_writer)
         .applied_objects()
-        .predicate_filter(predicates::generation, Default::default());
+        .predicate_filter(
+            Predicate::combine(predicates::generation, predicates::finalizers),
+            Default::default(),
+        );
 
     let endpointslice_watch_api: Api<EndpointSlice> = Api::all(k8s_client.clone());
 
