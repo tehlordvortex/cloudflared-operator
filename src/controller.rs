@@ -780,13 +780,16 @@ pub async fn reconcile(mut tunnel: Arc<CfdTunnel>, ctx: Arc<Context>) -> Result<
             }
         }
 
-        cleanup_old_resources(
-            &ctx,
-            &tunnel,
-            &ctx.namespace,
-            servicemonitor.as_ref().map(|(_, service)| service),
-        )
-        .await?;
+        let mut cleanup_futures = vec![];
+        cleanup_futures.push(
+            cleanup_old_resources(
+                &ctx,
+                &tunnel,
+                &ctx.namespace,
+                servicemonitor.as_ref().map(|(_, service)| service),
+            )
+            .boxed(),
+        );
 
         let old_servicemonitor_namespace = tunnel
             .status
@@ -798,21 +801,18 @@ pub async fn reconcile(mut tunnel: Arc<CfdTunnel>, ctx: Arc<Context>) -> Result<
             .into_iter()
             .chain(old_servicemonitor_namespace)
         {
-            match cleanup_old_resources(
-                &ctx,
-                &tunnel,
-                namespace,
-                servicemonitor
-                    .as_ref()
-                    .map(|(servicemonitor, _)| servicemonitor),
-            )
-            .await
-            {
-                Ok(()) => {}
-                // The CRD doesn't exist
-                Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => {}
-                Err(err) => return Err(err),
-            };
+            cleanup_futures.push(
+                cleanup_old_resources(
+                    &ctx,
+                    &tunnel,
+                    namespace,
+                    servicemonitor
+                        .as_ref()
+                        .map(|(servicemonitor, _)| servicemonitor),
+                )
+                .map(ignore_crd_not_found_error)
+                .boxed(),
+            );
         }
 
         let old_dnsendpoint_namespace = tunnel
@@ -825,16 +825,19 @@ pub async fn reconcile(mut tunnel: Arc<CfdTunnel>, ctx: Arc<Context>) -> Result<
             .into_iter()
             .chain(old_dnsendpoint_namespace)
         {
-            match cleanup_old_resources(&ctx, &tunnel, namespace, dnsendpoint.as_ref()).await {
-                Ok(()) => {}
-                // The CRD doesn't exist
-                Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => {}
-                Err(err) => return Err(err),
-            };
+            cleanup_futures.push(
+                cleanup_old_resources(&ctx, &tunnel, namespace, dnsendpoint.as_ref())
+                    .map(ignore_crd_not_found_error)
+                    .boxed(),
+            );
         }
 
-        cleanup_old_resources(&ctx, &tunnel, &ctx.namespace, [&configmap]).await?;
-        cleanup_old_resources(&ctx, &tunnel, &ctx.namespace, [&deployment]).await?;
+        cleanup_futures
+            .push(cleanup_old_resources(&ctx, &tunnel, &ctx.namespace, [&configmap]).boxed());
+        cleanup_futures
+            .push(cleanup_old_resources(&ctx, &tunnel, &ctx.namespace, [&deployment]).boxed());
+
+        futures::future::try_join_all(cleanup_futures).await?;
 
         let patch = Patch::Apply(json!({
             "apiVersion": CfdTunnel::api_version(&()),
@@ -873,10 +876,14 @@ pub async fn cleanup(tunnel: Arc<CfdTunnel>, ctx: Arc<Context>) -> Result<Action
         ctx.k8s_client.clone(),
         &tunnel.namespace().expect("namespaced"),
     );
+    let mut cleanup_futures = vec![];
 
-    cleanup_old_resources::<Deployment>(&ctx, &tunnel, &ctx.namespace, &[]).await?;
-    cleanup_old_resources::<ConfigMap>(&ctx, &tunnel, &ctx.namespace, &[]).await?;
-    cleanup_old_resources::<Secret>(&ctx, &tunnel, &ctx.namespace, &[]).await?;
+    cleanup_futures
+        .push(cleanup_old_resources::<Deployment>(&ctx, &tunnel, &ctx.namespace, &[]).boxed());
+    cleanup_futures
+        .push(cleanup_old_resources::<ConfigMap>(&ctx, &tunnel, &ctx.namespace, &[]).boxed());
+    cleanup_futures
+        .push(cleanup_old_resources::<Secret>(&ctx, &tunnel, &ctx.namespace, &[]).boxed());
 
     if let Some(CfdTunnelStatus {
         tunnel_id,
@@ -886,22 +893,22 @@ pub async fn cleanup(tunnel: Arc<CfdTunnel>, ctx: Arc<Context>) -> Result<Action
     }) = tunnel.status.as_ref()
     {
         for namespace in servicemonitor_namespace.iter().chain([&ctx.namespace]) {
-            match cleanup_old_resources::<ServiceMonitor>(&ctx, &tunnel, namespace, &[]).await {
-                Ok(()) => {}
-                // The CRD doesn't exist
-                Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => {}
-                Err(err) => return Err(err),
-            }
+            cleanup_futures.push(
+                cleanup_old_resources::<ServiceMonitor>(&ctx, &tunnel, namespace, &[])
+                    .map(ignore_crd_not_found_error)
+                    .boxed(),
+            );
         }
 
         for namespace in dnsendpoint_namespace.iter().chain([&ctx.namespace]) {
-            match cleanup_old_resources::<DNSEndpoint>(&ctx, &tunnel, namespace, &[]).await {
-                Ok(()) => {}
-                // The CRD doesn't exist
-                Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => {}
-                Err(err) => return Err(err),
-            }
+            cleanup_futures.push(
+                cleanup_old_resources::<DNSEndpoint>(&ctx, &tunnel, namespace, &[])
+                    .map(ignore_crd_not_found_error)
+                    .boxed(),
+            );
         }
+
+        futures::future::try_join_all(cleanup_futures).await?;
 
         if let Some(tunnel_id) = tunnel_id {
             let cf_client = cf_client_for_tunnel(&ctx, &tunnel).await?;
@@ -919,6 +926,8 @@ pub async fn cleanup(tunnel: Arc<CfdTunnel>, ctx: Arc<Context>) -> Result<Action
                     .map_err(Error::CfTunnel)?;
             }
         }
+    } else {
+        futures::future::try_join_all(cleanup_futures).await?;
     }
 
     let patch = Patch::Merge(json!({
@@ -1657,5 +1666,14 @@ fn reconciled_condition(observed_generation: Option<i64>, status: ReconcileStatu
         },
         observed_generation,
         last_transition_time: k8s_openapi::jiff::Timestamp::now().into(),
+    }
+}
+
+fn ignore_crd_not_found_error(result: Result<()>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        // The CRD doesn't exist
+        Err(Error::Delete(kube::Error::Api(status))) if status.is_not_found() => Ok(()),
+        Err(err) => Err(err),
     }
 }
